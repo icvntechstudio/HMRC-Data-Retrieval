@@ -1,9 +1,10 @@
+import os
 import pandas as pd
 import requests
 import re
 
 # Replace 'your_api_key' with your actual API key
-api_key = 'api_key'
+api_key = os.getenv('COMPANIES_API_KEY')
 
 def get_company_info(company_number):
     url = f"https://api.companieshouse.gov.uk/company/{company_number}"
@@ -22,7 +23,7 @@ def extract_company_number(company_name):
 
 # Load the Excel sheet
 try:
-    df = pd.read_excel("/content/drive/MyDrive/Business Acquisition HSM Maintenance and AV ATP 2024.xlsx", sheet_name='3rd_Order29052401')
+    df = pd.read_excel("./data/Business Acquisition HSM Maintenance and AV ATP 2024.xlsx", sheet_name='4th_HSM180724')
 except FileNotFoundError:
     print("Error: File not found. Please ensure the file path is correct.")
     exit()
@@ -36,20 +37,22 @@ print(df.head())  # View the first few rows to identify relevant data
 
 # Function to convert 'Turnover Banding' to numeric values
 def convert_turnover(turnover_str):
-    match = re.search(r'£(\d+(?:,\d+)?)', turnover_str)  # Capture numbers with commas
-    if match:
-        return float(match.group(1).replace(',', ''))  # Remove commas and convert to float
-    return None  # Return None if the value can't be converted
+    if pd.isna(turnover_str):
+        return None
+    # Only return values for bands F and above (£1M+)
+    if turnover_str.startswith(('F:', 'G:', 'H:', 'I:')):
+        return turnover_str
+    return None
 
-# Convert 'Turnover Banding' to numeric
-df['Turnover Banding'] = df['Turnover Banding'].apply(convert_turnover)
+# Convert 'TurnoverBand' to numeric
+df['TurnoverBand'] = df['TurnoverBand'].apply(convert_turnover)
 
 # Check the turnover values to ensure conversion worked
-print("Turnover Banding values after conversion:", df['Turnover Banding'].head())
+print("Turnover values after conversion:", df['TurnoverBand'].head())
 
 # Process each row
 for index, row in df.iterrows():
-    company_name = row['Company Name']
+    company_name = row['CompanyName']
     company_number = extract_company_number(company_name)
     
     if company_number:
@@ -67,12 +70,12 @@ for index, row in df.iterrows():
 # Check the 'Filtered Directors' values
 print("Filtered Directors values:", df['Filtered Directors'].head())
 
-# Relax filtering to check the data
-filtered_df = df[(df['Turnover Banding'].notnull())]
+# Filter for companies with £1M+ turnover (bands F, G, H, I)
+filtered_df = df[df['TurnoverBand'].notna()]
 
 # Display the filtered DataFrame (without strict conditions)
 print(filtered_df)
 
 # Save filtered data to a CSV file
-filtered_df.to_csv("/content/filtered_companies.csv", index=False)
-print("Data saved to 'filtered_companies.csv'")
+filtered_df.to_csv("./data/filtered_companies_4th_sheet.csv", index=False)
+print("Data saved to 'filtered_companies_4th_sheet.csv'")
