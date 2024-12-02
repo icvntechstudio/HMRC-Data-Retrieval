@@ -63,129 +63,149 @@ class CompaniesHouseClient:
         self.last_request_time = time.time()
 
     def make_request(self, url, params=None):
-        """Make a request to the Companies House API with authentication."""
-        try:
-            self._rate_limit()
-            logger.debug(f"Making request to {url} with params {params}")
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            logger.debug(f"Response status: {response.status_code}")
-            logger.debug(f"Response data: {json.dumps(data, indent=2)}")
-            return data
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed: {str(e)}")
-            if hasattr(e, 'response'):
-                if e.response.status_code == 401:
-                    logger.error("Authentication failed. Check your API key.")
-                elif e.response.status_code == 429:
-                    logger.error("Rate limit exceeded. Waiting before retrying...")
-                    time.sleep(RATE_LIMIT_DELAY * 2)  # Wait longer on rate limit
-                logger.error(f"Response status code: {e.response.status_code}")
-                logger.error(f"Response text: {e.response.text}")
-            return None
+        """Make a request to the Companies House API with retry logic"""
+        max_retries = 3
+        retry_delay = 5  # increased delay between retries
+        
+        for attempt in range(max_retries):
+            try:
+                time.sleep(retry_delay)  # Always wait between requests
+                logger.info(f"Making request to {url} (Attempt {attempt + 1}/{max_retries})")
+                response = requests.get(
+                    url,
+                    params=params,
+                    auth=(self.api_key, ''),
+                    timeout=30,
+                    headers={'Accept': 'application/json'}
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"Request failed: {str(e)}")
+                if attempt == max_retries - 1:
+                    return None
+        return None
 
     def search_companies(self, sic_code):
-        """Search for companies with specific SIC code."""
-        all_companies = []
-        start_index = 0
-        items_per_page = 100
-        max_results = 500  # Limit total results to avoid excessive API calls
+        """Search for companies with specific SIC code"""
+        companies = []
+        items_per_page = 100  # Maximum allowed by API
+        max_pages = 50  # Increased to get more results
         
-        # First search for companies in general categories
-        search_queries = [
-            'waste management',  # For waste management companies
-            'cleaning services',  # For cleaning companies
-            'recycling',         # Additional relevant terms
-            'facilities management'
-        ]
+        # Search terms that are likely to find companies in our target sectors
+        search_terms = {
+            '81210': ['cleaning', 'building cleaning', 'office cleaning', 'commercial cleaning', 'facilities'],
+            '81220': ['industrial cleaning', 'specialist cleaning', 'commercial cleaning', 'building'],
+            '81290': ['cleaning services', 'commercial cleaning', 'specialist', 'facilities'],
+            '38110': ['waste collection', 'waste management', 'recycling', 'environmental'],
+            '38120': ['hazardous waste', 'chemical waste', 'waste management', 'environmental'],
+            '38210': ['waste treatment', 'waste disposal', 'recycling', 'environmental'],
+            '38220': ['hazardous waste treatment', 'waste management', 'environmental'],
+            '38230': ['waste recycling', 'materials recovery', 'recycling', 'environmental']
+        }
         
-        for search_query in search_queries:
-            logger.info(f"Trying search query: {search_query}")
+        terms = search_terms.get(sic_code, [sic_code])
+        processed_companies = set()  # Track processed companies to avoid duplicates
+        
+        for term in terms:
+            logger.info(f"Searching with term: {term}")
             start_index = 0
             
-            while start_index < max_results:
-                url = f"{BASE_URL}/search/companies"
+            for page in range(max_pages):
                 params = {
-                    'q': search_query,
+                    'q': term,
                     'items_per_page': items_per_page,
                     'start_index': start_index,
-                    'restrictions': 'active'  # Only active companies
+                    'restrictions': 'active'
                 }
                 
-                logger.info(f"Searching companies (start_index: {start_index})")
-                data = self.make_request(url, params)
+                url = f"{BASE_URL}/search/companies"
+                response_data = self.make_request(url, params)
                 
-                if not data:
-                    logger.error(f"Failed to get data for query {search_query}")
+                if not response_data or 'items' not in response_data:
+                    logger.warning(f"No results found for search term: {term} on page {page + 1}")
                     break
-                    
-                items = data.get('items', [])
+                
+                items = response_data['items']
                 if not items:
-                    logger.info(f"No more results for query {search_query}")
                     break
-                    
-                total_results = data.get('total_results', 0)
-                logger.info(f"Found {len(items)} companies (total available: {total_results})")
                 
-                # Filter companies that have the specific SIC code
-                filtered_items = []
+                logger.info(f"Processing {len(items)} companies from page {page + 1}")
+                
+                # Filter companies by SIC code
                 for company in items:
                     company_number = company.get('company_number')
-                    if company_number:
-                        details = self.get_company_details(company_number)
-                        if details and 'sic_codes' in details:
-                            sic_codes = [code.strip() for code in details.get('sic_codes', [])]
-                            logger.debug(f"Company {company_number} SIC codes: {sic_codes}")
-                            if any(code.startswith(str(sic_code)) for code in sic_codes):
-                                filtered_items.append({
-                                    'company_number': company_number,
-                                    'company_name': company.get('title', ''),
-                                    'company_status': details.get('company_status', ''),
-                                    'incorporation_date': details.get('date_of_creation', ''),
-                                    'sic_codes': sic_codes,
-                                    'registered_office_address': details.get('registered_office_address', {}),
-                                    'company_type': details.get('type', ''),
-                                    'last_accounts_date': details.get('last_accounts', {}).get('made_up_to', '')
-                                })
-                                logger.info(f"Added company {company.get('title')} ({company_number}) with SIC codes {sic_codes}")
-                
-                all_companies.extend(filtered_items)
-                
-                if len(items) < items_per_page:
-                    break
                     
+                    # Skip if we've already processed this company
+                    if company_number in processed_companies:
+                        continue
+                    
+                    # Get full company details to check SIC codes
+                    company_details = self.get_company_details(company_number)
+                    if company_details and 'sic_codes' in company_details:
+                        company_sic_codes = company_details.get('sic_codes', [])
+                        
+                        # Check if any SIC code matches our target
+                        if any(code.startswith(sic_code) for code in company_sic_codes):
+                            companies.append(company_details)
+                            processed_companies.add(company_number)
+                            logger.info(f"Found matching company: {company_details.get('company_name')} with SIC codes {company_sic_codes}")
+                
+                # Move to next page
                 start_index += items_per_page
                 
-                # Respect rate limiting
-                time.sleep(RATE_LIMIT_DELAY)
+                # If we got fewer items than requested, we've reached the end
+                if len(items) < items_per_page:
+                    break
+                
+                # Add a delay between pages to respect rate limits
+                time.sleep(3)
+            
+            # Add a delay between search terms
+            time.sleep(5)
         
-        # Remove duplicates based on company number
-        unique_companies = {company['company_number']: company for company in all_companies}
-        all_companies = list(unique_companies.values())
-        
-        logger.info(f"Total unique companies found: {len(all_companies)}")
-        return all_companies
+        logger.info(f"Found {len(companies)} unique companies for SIC code {sic_code}")
+        return companies
 
     def get_company_details(self, company_number):
-        """Get detailed information about a company."""
+        """Get detailed information about a company"""
+        if not company_number:
+            return None
+            
         url = f"{BASE_URL}/company/{company_number}"
-        logger.debug(f"Getting details for company {company_number}")
-        
         data = self.make_request(url)
+        
         if data:
-            logger.debug(f"Got details for company {company_number}: {json.dumps(data, indent=2)}")
-        else:
-            logger.error(f"Failed to get details for company {company_number}")
+            # Add the company number to the data if not present
+            data['company_number'] = company_number
+            
+            # Clean up the company name
+            if 'company_name' not in data and 'title' in data:
+                data['company_name'] = data['title']
+            
+            # Ensure SIC codes are present
+            if 'sic_codes' not in data:
+                data['sic_codes'] = []
+                
         return data
 
     def get_company_officers(self, company_number):
         """Get officers of a company"""
+        if not company_number:
+            return None
+            
         url = f"{BASE_URL}/company/{company_number}/officers"
-        return self.make_request(url)
+        params = {
+            'items_per_page': 100,
+            'status': 'active'  # Only get active officers
+        }
+        return self.make_request(url, params)
 
     def get_company_accounts(self, company_number):
         """Get company accounts information"""
+        if not company_number:
+            return None
+            
         url = f"{BASE_URL}/company/{company_number}/filing-history"
         data = self.make_request(url)
         
@@ -271,7 +291,7 @@ class CompaniesHouseClient:
             'incorporation_date',
             'sic_codes',
             'registered_office_address',
-            'number_of_active_directors_over_50',
+            'active_directors_over_50',
             'company_type',
             'companies_house_turnover',
             'hmrc_turnover',
@@ -309,20 +329,14 @@ class CompaniesHouseClient:
                         
                         logger.info(f"Processing company: {company_name} ({company_number})")
                         
-                        # Get detailed company information
-                        details = self.get_company_details(company_number)
-                        if not details:
-                            logger.warning(f"Could not get details for company {company_number}")
-                            continue
-                        
                         # Check company status
-                        if details.get('company_status', '').lower() != 'active':
+                        if company.get('company_status', '').lower() != 'active':
                             logger.info(f"Skipping inactive company: {company_name}")
                             continue
                         
-                        # Check for directors over minimum age
+                        # Get directors and their ages
                         officers = self.get_company_officers(company_number)
-                        active_directors_over_50 = 0
+                        eligible_directors = []
                         
                         if officers and 'items' in officers:
                             for officer in officers['items']:
@@ -330,11 +344,21 @@ class CompaniesHouseClient:
                                     not officer.get('resigned_on')):
                                     age = self.calculate_age(officer.get('date_of_birth'))
                                     if age and age >= MIN_DIRECTOR_AGE:
-                                        active_directors_over_50 += 1
+                                        eligible_directors.append({
+                                            'name': officer.get('name', ''),
+                                            'age': age,
+                                            'appointed_on': officer.get('appointed_on', '')
+                                        })
                         
-                        if active_directors_over_50 == 0:
+                        if not eligible_directors:
                             logger.info(f"No active directors over 50 found for {company_name}")
                             continue
+                        
+                        # Format director information
+                        directors_info = '; '.join([
+                            f"{d['name']} (Age: {d['age']}, Appointed: {d['appointed_on']})"
+                            for d in eligible_directors
+                        ])
                         
                         # Get turnover information from Companies House
                         ch_turnover = self.get_company_accounts(company_number)
@@ -363,16 +387,16 @@ class CompaniesHouseClient:
                         company_data = {
                             'company_number': company_number,
                             'company_name': company_name,
-                            'company_status': details.get('company_status', ''),
-                            'incorporation_date': details.get('date_of_creation', ''),
-                            'sic_codes': ', '.join(details.get('sic_codes', [])),
-                            'registered_office_address': self._format_address(details.get('registered_office_address', {})),
-                            'number_of_active_directors_over_50': active_directors_over_50,
-                            'company_type': details.get('type', ''),
+                            'company_status': company.get('company_status', ''),
+                            'incorporation_date': company.get('date_of_creation', ''),
+                            'sic_codes': ', '.join(company.get('sic_codes', [])),
+                            'registered_office_address': self._format_address(company.get('registered_office_address', {})),
+                            'active_directors_over_50': directors_info,
+                            'company_type': company.get('type', ''),
                             'companies_house_turnover': f"£{ch_turnover:,.2f}" if ch_turnover else 'Not available',
                             'hmrc_turnover': f"£{hmrc_turnover:,.2f}" if hmrc_turnover else 'Not available',
                             'last_accounts_date': (
-                                details.get('last_accounts', {}).get('made_up_to', 'Not available')
+                                company.get('last_accounts', {}).get('made_up_to', 'Not available')
                             ),
                             'category': category,
                             'vat_number': vat_number or 'Not available'
