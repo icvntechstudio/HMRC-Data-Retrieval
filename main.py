@@ -118,14 +118,31 @@ class CompaniesHouseClient:
         
         # Search terms optimized for each SIC code
         search_terms = {
-            '81210': [f'"{sic_code}" cleaning'],  # Use exact SIC code match
+            # General cleaning
+            '81210': [f'"{sic_code}" cleaning'],
+            '81200': [f'"{sic_code}" cleaning'],
+            
+            # Specialized cleaning
             '81220': [f'"{sic_code}" cleaning'],
+            '81221': [f'"{sic_code}" window cleaning'],
+            '81222': [f'"{sic_code}" specialized cleaning'],
+            '81223': [f'"{sic_code}" chimney cleaning'],
+            '81229': [f'"{sic_code}" specialized cleaning'],
+            
+            # Other cleaning
             '81290': [f'"{sic_code}" cleaning'],
+            '81291': [f'"{sic_code}" disinfecting'],
+            '81299': [f'"{sic_code}" cleaning'],
+            
+            # Additional services
+            '81300': [f'"{sic_code}" landscaping'],
+            '82990': [f'"{sic_code}" cleaning'],
+            
+            # Waste management
             '38110': [f'"{sic_code}" waste'],
-            '38120': [f'"{sic_code}" waste'],
-            '38210': [f'"{sic_code}" waste'],
-            '38220': [f'"{sic_code}" waste'],
-            '38230': [f'"{sic_code}" waste']
+            '38210': [f'"{sic_code}" waste treatment'],
+            '38220': [f'"{sic_code}" hazardous waste'],
+            '38320': [f'"{sic_code}" recycling']
         }
         
         terms = search_terms.get(sic_code, [f'"{sic_code}"'])
@@ -291,15 +308,23 @@ class CompaniesHouseClient:
         sic_codes = {
             "Cleaning": [
                 '81210',  # General cleaning of buildings
+                '81229',  # Other specialized cleaning activities
                 '81220',  # Other building and industrial cleaning activities
+                '81222',  # Specialized cleaning activities
+                '81221',  # Window cleaning services
+                '81223',  # Chimney cleaning services
+                '81299',  # Other cleaning services n.e.c.
                 '81290',  # Other cleaning activities
+                '81291',  # Disinfecting and exterminating services
+                '81200',  # General cleaning activities
+                '81300',  # Landscaping activities
+                '82990',  # Other business support activities
             ],
             "Waste Management": [
                 '38110',  # Collection of non-hazardous waste
-                '38120',  # Collection of hazardous waste
-                '38210',  # Treatment and disposal of non-hazardous waste
+                '38320',  # Recovery of sorted materials
                 '38220',  # Treatment and disposal of hazardous waste
-                '38230',  # Recovery of sorted materials
+                '38210',  # Treatment and disposal of non-hazardous waste
             ]
         }
         
