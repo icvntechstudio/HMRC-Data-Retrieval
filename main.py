@@ -1,14 +1,13 @@
 import os
 import requests
 import logging
-import base64
-from dotenv import load_dotenv
 import urllib.parse
 import json
 import csv
 from datetime import datetime
 import time
 from hmrc_client import HMRCClient
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 COMPANIES_API_KEY = os.getenv('COMPANIES_API_KEY')
-BASE_URL = 'https://api.company-information.service.gov.uk'
+BASE_URL = 'https://api.companieshouse.gov.uk'
 RATE_LIMIT_DELAY = 0.6  # Minimum delay between requests (in seconds)
 MIN_DIRECTOR_AGE = 50  # Minimum age for directors
 MIN_TURNOVER = 1000000  # Minimum turnover in pounds
@@ -90,7 +89,7 @@ class CompaniesHouseClient:
         """Search for companies with specific SIC code"""
         companies = []
         items_per_page = 100  # Maximum allowed by API
-        max_pages = 50  # Increased to get more results
+        max_results = 10000  # Maximum number of results to process
         
         # Search terms that are likely to find companies in our target sectors
         search_terms = {
@@ -110,8 +109,9 @@ class CompaniesHouseClient:
         for term in terms:
             logger.info(f"Searching with term: {term}")
             start_index = 0
+            total_results = 0
             
-            for page in range(max_pages):
+            while total_results < max_results:
                 params = {
                     'q': term,
                     'items_per_page': items_per_page,
@@ -123,16 +123,18 @@ class CompaniesHouseClient:
                 response_data = self.make_request(url, params)
                 
                 if not response_data or 'items' not in response_data:
-                    logger.warning(f"No results found for search term: {term} on page {page + 1}")
+                    logger.warning(f"No results found for search term: {term} at index {start_index}")
                     break
                 
                 items = response_data['items']
                 if not items:
+                    logger.info(f"No more items found for term: {term}")
                     break
                 
-                logger.info(f"Processing {len(items)} companies from page {page + 1}")
+                total_items = response_data.get('total_results', 0)
+                logger.info(f"Processing {len(items)} companies from index {start_index}. Total available: {total_items}")
                 
-                # Filter companies by SIC code
+                # Process companies in this batch
                 for company in items:
                     company_number = company.get('company_number')
                     
@@ -150,19 +152,24 @@ class CompaniesHouseClient:
                             companies.append(company_details)
                             processed_companies.add(company_number)
                             logger.info(f"Found matching company: {company_details.get('company_name')} with SIC codes {company_sic_codes}")
+                    
+                    total_results += 1
+                    if total_results >= max_results:
+                        logger.info(f"Reached maximum results limit of {max_results}")
+                        break
                 
                 # Move to next page
-                start_index += items_per_page
+                start_index += len(items)
                 
-                # If we got fewer items than requested, we've reached the end
-                if len(items) < items_per_page:
+                # If we got fewer items than requested or reached the total, we've reached the end
+                if len(items) < items_per_page or start_index >= total_items:
                     break
                 
                 # Add a delay between pages to respect rate limits
-                time.sleep(3)
+                time.sleep(RATE_LIMIT_DELAY)
             
             # Add a delay between search terms
-            time.sleep(5)
+            time.sleep(RATE_LIMIT_DELAY * 2)
         
         logger.info(f"Found {len(companies)} unique companies for SIC code {sic_code}")
         return companies
@@ -318,93 +325,114 @@ class CompaniesHouseClient:
                         logger.warning(f"No companies found for SIC code {sic_code}")
                         continue
                     
-                    for company in companies:
-                        processed_count += 1
-                        company_number = company.get('company_number')
-                        company_name = company.get('company_name', 'Unknown')
+                    # Process companies in batches
+                    batch_size = 100
+                    for i in range(0, len(companies), batch_size):
+                        batch = companies[i:i + batch_size]
+                        logger.info(f"Processing batch {i//batch_size + 1} of {len(companies)//batch_size + 1}")
                         
-                        if not company_number:
-                            logger.warning(f"Skipping company with no number: {company}")
-                            continue
+                        for company in batch:
+                            processed_count += 1
+                            company_number = company.get('company_number')
+                            company_name = company.get('company_name', 'Unknown')
+                            
+                            if not company_number:
+                                logger.warning(f"Skipping company with no number: {company}")
+                                continue
+                            
+                            logger.info(f"Processing company: {company_name} ({company_number})")
+                            
+                            try:
+                                # Check company status
+                                if company.get('company_status', '').lower() != 'active':
+                                    logger.info(f"Skipping inactive company: {company_name}")
+                                    continue
+                                
+                                # Get directors and their ages
+                                officers = self.get_company_officers(company_number)
+                                eligible_directors = []
+                                
+                                if officers and 'items' in officers:
+                                    for officer in officers['items']:
+                                        if (officer.get('officer_role') == 'director' and 
+                                            not officer.get('resigned_on')):
+                                            age = self.calculate_age(officer.get('date_of_birth'))
+                                            if age and age >= MIN_DIRECTOR_AGE:
+                                                eligible_directors.append({
+                                                    'name': officer.get('name', ''),
+                                                    'age': age,
+                                                    'appointed_on': officer.get('appointed_on', '')
+                                                })
+                                
+                                if not eligible_directors:
+                                    logger.info(f"No active directors over 50 found for {company_name}")
+                                    continue
+                                
+                                # Format director information
+                                directors_info = '; '.join([
+                                    f"{d['name']} (Age: {d['age']}, Appointed: {d['appointed_on']})"
+                                    for d in eligible_directors
+                                ])
+                                
+                                # Get turnover information from Companies House
+                                ch_turnover = self.get_company_accounts(company_number)
+                                
+                                # Get VAT number and HMRC turnover
+                                vat_info = self.hmrc_client.get_vat_info(company_number)
+                                hmrc_turnover = None
+                                vat_number = None
+                                
+                                if vat_info:
+                                    vat_number = vat_info.get('vatNumber')
+                                    if vat_number:
+                                        hmrc_turnover = self.hmrc_client.get_company_turnover(vat_number)
+                                
+                                # Check if either turnover meets the minimum requirement
+                                meets_turnover = (
+                                    (ch_turnover and ch_turnover >= MIN_TURNOVER) or
+                                    (hmrc_turnover and hmrc_turnover >= MIN_TURNOVER)
+                                )
+                                
+                                if not meets_turnover:
+                                    logger.info(f"Company {company_name} does not meet turnover requirements")
+                                    continue
+                                
+                                # Save company data
+                                company_data = {
+                                    'company_number': company_number,
+                                    'company_name': company_name,
+                                    'company_status': company.get('company_status', ''),
+                                    'incorporation_date': company.get('date_of_creation', ''),
+                                    'sic_codes': ', '.join(company.get('sic_codes', [])),
+                                    'registered_office_address': self._format_address(company.get('registered_office_address', {})),
+                                    'active_directors_over_50': directors_info,
+                                    'company_type': company.get('type', ''),
+                                    'companies_house_turnover': f"£{ch_turnover:,.2f}" if ch_turnover else 'Not available',
+                                    'hmrc_turnover': f"£{hmrc_turnover:,.2f}" if hmrc_turnover else 'Not available',
+                                    'last_accounts_date': (
+                                        company.get('last_accounts', {}).get('made_up_to', 'Not available')
+                                    ),
+                                    'category': category,
+                                    'vat_number': vat_number or 'Not available'
+                                }
+                                
+                                writer.writerow(company_data)
+                                csvfile.flush()  # Force write to disk
+                                saved_count += 1
+                                logger.info(f"Saved data for company {company_name}")
+                                
+                            except Exception as e:
+                                logger.error(f"Error processing company {company_name}: {str(e)}")
+                                continue
+                            
+                            # Add a small delay between companies
+                            time.sleep(RATE_LIMIT_DELAY)
                         
-                        logger.info(f"Processing company: {company_name} ({company_number})")
+                        logger.info(f"Completed batch. Total processed: {processed_count}, Total saved: {saved_count}")
                         
-                        # Check company status
-                        if company.get('company_status', '').lower() != 'active':
-                            logger.info(f"Skipping inactive company: {company_name}")
-                            continue
-                        
-                        # Get directors and their ages
-                        officers = self.get_company_officers(company_number)
-                        eligible_directors = []
-                        
-                        if officers and 'items' in officers:
-                            for officer in officers['items']:
-                                if (officer.get('officer_role') == 'director' and 
-                                    not officer.get('resigned_on')):
-                                    age = self.calculate_age(officer.get('date_of_birth'))
-                                    if age and age >= MIN_DIRECTOR_AGE:
-                                        eligible_directors.append({
-                                            'name': officer.get('name', ''),
-                                            'age': age,
-                                            'appointed_on': officer.get('appointed_on', '')
-                                        })
-                        
-                        if not eligible_directors:
-                            logger.info(f"No active directors over 50 found for {company_name}")
-                            continue
-                        
-                        # Format director information
-                        directors_info = '; '.join([
-                            f"{d['name']} (Age: {d['age']}, Appointed: {d['appointed_on']})"
-                            for d in eligible_directors
-                        ])
-                        
-                        # Get turnover information from Companies House
-                        ch_turnover = self.get_company_accounts(company_number)
-                        
-                        # Get VAT number and HMRC turnover
-                        vat_info = self.hmrc_client.get_vat_info(company_number)
-                        hmrc_turnover = None
-                        vat_number = None
-                        
-                        if vat_info:
-                            vat_number = vat_info.get('vatNumber')
-                            if vat_number:
-                                hmrc_turnover = self.hmrc_client.get_company_turnover(vat_number)
-                        
-                        # Check if either turnover meets the minimum requirement
-                        meets_turnover = (
-                            (ch_turnover and ch_turnover >= MIN_TURNOVER) or
-                            (hmrc_turnover and hmrc_turnover >= MIN_TURNOVER)
-                        )
-                        
-                        if not meets_turnover:
-                            logger.info(f"Company {company_name} does not meet turnover requirements")
-                            continue
-                        
-                        # Save company data
-                        company_data = {
-                            'company_number': company_number,
-                            'company_name': company_name,
-                            'company_status': company.get('company_status', ''),
-                            'incorporation_date': company.get('date_of_creation', ''),
-                            'sic_codes': ', '.join(company.get('sic_codes', [])),
-                            'registered_office_address': self._format_address(company.get('registered_office_address', {})),
-                            'active_directors_over_50': directors_info,
-                            'company_type': company.get('type', ''),
-                            'companies_house_turnover': f"£{ch_turnover:,.2f}" if ch_turnover else 'Not available',
-                            'hmrc_turnover': f"£{hmrc_turnover:,.2f}" if hmrc_turnover else 'Not available',
-                            'last_accounts_date': (
-                                company.get('last_accounts', {}).get('made_up_to', 'Not available')
-                            ),
-                            'category': category,
-                            'vat_number': vat_number or 'Not available'
-                        }
-                        
-                        writer.writerow(company_data)
-                        saved_count += 1
-                        logger.info(f"Saved data for company {company_name}")
+                    logger.info(f"Completed SIC code {sic_code}. Total processed: {processed_count}, Total saved: {saved_count}")
+                
+                logger.info(f"Completed category {category}. Total processed: {processed_count}, Total saved: {saved_count}")
         
         logger.info(f"Processing complete. Processed {processed_count} companies, saved {saved_count} to CSV")
         return output_file
