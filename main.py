@@ -24,7 +24,8 @@ COMPANIES_API_KEY = os.getenv('COMPANIES_API_KEY')
 BASE_URL = 'https://api.companieshouse.gov.uk'
 RATE_LIMIT_DELAY = 0.6  # Minimum delay between requests (in seconds)
 MIN_DIRECTOR_AGE = 50  # Minimum age for directors
-MIN_TURNOVER = 1000000  # Minimum turnover in pounds
+MIN_TURNOVER = 1_000_000  # £1 million
+MAX_TURNOVER = 1_000_000_000  # £1 billion
 
 class CompaniesHouseClient:
     def __init__(self):
@@ -414,8 +415,15 @@ class CompaniesHouseClient:
                                     if vat_number:
                                         hmrc_turnover = self.hmrc_client.get_company_turnover(vat_number)
                                 
-                                # Save all companies that have directors over 50, regardless of turnover
-                                if eligible_directors:
+                                # Check if either turnover meets our criteria
+                                turnover_ok = False
+                                if ch_turnover and MIN_TURNOVER <= ch_turnover <= MAX_TURNOVER:
+                                    turnover_ok = True
+                                elif hmrc_turnover and MIN_TURNOVER <= hmrc_turnover <= MAX_TURNOVER:
+                                    turnover_ok = True
+                                
+                                # Save companies that have directors over 50 and meet turnover criteria
+                                if eligible_directors and turnover_ok:
                                     company_data = {
                                         'company_number': company_number,
                                         'company_name': company_name,
