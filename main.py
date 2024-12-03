@@ -35,16 +35,17 @@ class CompaniesHouseClient:
             
         # Set up session with authentication
         self.session = requests.Session()
-        self.session.auth = (self.api_key, '')  # Companies House uses the API key as username and empty password
+        self.session.auth = (self.api_key, '')
+        self.session.headers.update({
+            'Accept': 'application/json',
+            'User-Agent': 'CompanyDataRetrieval/1.0'
+        })
         
-        # Configure session for better error handling
-        self.session.hooks = {
-            'response': lambda r, *args, **kwargs: r.raise_for_status()
-        }
-        
-        # Initialize rate limiting
-        self.last_request_time = 0
-        self.requests_per_second = 0.5  # Max 30 requests per minute
+        # Configure rate limiting
+        self.last_request_time = time.time()
+        self.request_times = []  # Keep track of request timestamps
+        self.max_requests_per_minute = 500  # Conservative limit
+        self.min_request_interval = 0.15  # Minimum time between requests in seconds
         
         self.hmrc_client = HMRCClient()
         logger.info("Initialized Companies House client")
@@ -52,124 +53,140 @@ class CompaniesHouseClient:
     def _rate_limit(self):
         """Implement rate limiting for API requests."""
         current_time = time.time()
-        min_interval = 1.0 / self.requests_per_second
         
+        # Remove request timestamps older than 1 minute
+        self.request_times = [t for t in self.request_times if current_time - t <= 60]
+        
+        # If we've made too many requests in the last minute, wait
+        if len(self.request_times) >= self.max_requests_per_minute:
+            sleep_time = 60 - (current_time - self.request_times[0])
+            if sleep_time > 0:
+                logger.info(f"Rate limit approaching, waiting {sleep_time:.2f} seconds...")
+                time.sleep(sleep_time)
+                self.request_times = []  # Reset after waiting
+        
+        # Ensure minimum interval between requests
         time_since_last_request = current_time - self.last_request_time
-        if time_since_last_request < min_interval:
-            sleep_time = min_interval - time_since_last_request
-            time.sleep(sleep_time)
+        if time_since_last_request < self.min_request_interval:
+            time.sleep(self.min_request_interval - time_since_last_request)
         
         self.last_request_time = time.time()
+        self.request_times.append(self.last_request_time)
 
     def make_request(self, url, params=None):
         """Make a request to the Companies House API with retry logic"""
         max_retries = 3
-        retry_delay = 5  # increased delay between retries
+        base_delay = 2  # Base delay for exponential backoff
         
         for attempt in range(max_retries):
             try:
-                time.sleep(retry_delay)  # Always wait between requests
-                logger.info(f"Making request to {url} (Attempt {attempt + 1}/{max_retries})")
-                response = requests.get(
+                self._rate_limit()  # Apply rate limiting
+                
+                logger.debug(f"Making request to {url}")
+                response = self.session.get(
                     url,
                     params=params,
-                    auth=(self.api_key, ''),
-                    timeout=30,
-                    headers={'Accept': 'application/json'}
+                    timeout=30
                 )
+                
+                if response.status_code == 429:  # Rate limit exceeded
+                    retry_after = int(response.headers.get('Retry-After', base_delay * (2 ** attempt)))
+                    logger.warning(f"Rate limit exceeded. Waiting {retry_after} seconds...")
+                    time.sleep(retry_after)
+                    continue
+                
                 response.raise_for_status()
                 return response.json()
-            except Exception as e:
+                
+            except requests.exceptions.RequestException as e:
                 logger.error(f"Request failed: {str(e)}")
-                if attempt == max_retries - 1:
+                if attempt < max_retries - 1:
+                    sleep_time = base_delay * (2 ** attempt)
+                    logger.info(f"Retrying in {sleep_time} seconds...")
+                    time.sleep(sleep_time)
+                else:
                     return None
+        
         return None
 
     def search_companies(self, sic_code):
         """Search for companies with specific SIC code"""
         companies = []
-        items_per_page = 100  # Maximum allowed by API
-        max_results = 10000  # Maximum number of results to process
+        items_per_page = 100
+        max_results = 20000
+        processed_companies = set()
         
-        # Search terms that are likely to find companies in our target sectors
+        # Search terms optimized for each SIC code
         search_terms = {
-            '81210': ['cleaning', 'building cleaning', 'office cleaning', 'commercial cleaning', 'facilities'],
-            '81220': ['industrial cleaning', 'specialist cleaning', 'commercial cleaning', 'building'],
-            '81290': ['cleaning services', 'commercial cleaning', 'specialist', 'facilities'],
-            '38110': ['waste collection', 'waste management', 'recycling', 'environmental'],
-            '38120': ['hazardous waste', 'chemical waste', 'waste management', 'environmental'],
-            '38210': ['waste treatment', 'waste disposal', 'recycling', 'environmental'],
-            '38220': ['hazardous waste treatment', 'waste management', 'environmental'],
-            '38230': ['waste recycling', 'materials recovery', 'recycling', 'environmental']
+            '81210': [f'"{sic_code}" cleaning'],  # Use exact SIC code match
+            '81220': [f'"{sic_code}" cleaning'],
+            '81290': [f'"{sic_code}" cleaning'],
+            '38110': [f'"{sic_code}" waste'],
+            '38120': [f'"{sic_code}" waste'],
+            '38210': [f'"{sic_code}" waste'],
+            '38220': [f'"{sic_code}" waste'],
+            '38230': [f'"{sic_code}" waste']
         }
         
-        terms = search_terms.get(sic_code, [sic_code])
-        processed_companies = set()  # Track processed companies to avoid duplicates
+        terms = search_terms.get(sic_code, [f'"{sic_code}"'])
         
         for term in terms:
             logger.info(f"Searching with term: {term}")
             start_index = 0
-            total_results = 0
             
-            while total_results < max_results:
-                params = {
-                    'q': term,
-                    'items_per_page': items_per_page,
-                    'start_index': start_index,
-                    'restrictions': 'active'
-                }
-                
-                url = f"{BASE_URL}/search/companies"
-                response_data = self.make_request(url, params)
-                
-                if not response_data or 'items' not in response_data:
-                    logger.warning(f"No results found for search term: {term} at index {start_index}")
-                    break
-                
-                items = response_data['items']
-                if not items:
-                    logger.info(f"No more items found for term: {term}")
-                    break
-                
-                total_items = response_data.get('total_results', 0)
-                logger.info(f"Processing {len(items)} companies from index {start_index}. Total available: {total_items}")
-                
-                # Process companies in this batch
-                for company in items:
-                    company_number = company.get('company_number')
+            while start_index < max_results:
+                try:
+                    params = {
+                        'q': term,
+                        'items_per_page': items_per_page,
+                        'start_index': start_index,
+                        'restrictions': 'active'
+                    }
                     
-                    # Skip if we've already processed this company
-                    if company_number in processed_companies:
-                        continue
+                    response_data = self.make_request(f"{BASE_URL}/search/companies", params)
                     
-                    # Get full company details to check SIC codes
-                    company_details = self.get_company_details(company_number)
-                    if company_details and 'sic_codes' in company_details:
-                        company_sic_codes = company_details.get('sic_codes', [])
-                        
-                        # Check if any SIC code matches our target
-                        if any(code.startswith(sic_code) for code in company_sic_codes):
-                            companies.append(company_details)
-                            processed_companies.add(company_number)
-                            logger.info(f"Found matching company: {company_details.get('company_name')} with SIC codes {company_sic_codes}")
-                    
-                    total_results += 1
-                    if total_results >= max_results:
-                        logger.info(f"Reached maximum results limit of {max_results}")
+                    if not response_data or 'items' not in response_data:
                         break
-                
-                # Move to next page
-                start_index += len(items)
-                
-                # If we got fewer items than requested or reached the total, we've reached the end
-                if len(items) < items_per_page or start_index >= total_items:
+                    
+                    items = response_data['items']
+                    if not items:
+                        break
+                    
+                    total_items = response_data.get('total_results', 0)
+                    logger.info(f"Processing {len(items)} companies from index {start_index}. Total available: {total_items}")
+                    
+                    # Process companies in batches
+                    for company in items:
+                        company_number = company.get('company_number')
+                        
+                        if not company_number or company_number in processed_companies:
+                            continue
+                        
+                        # Get basic company details first
+                        company_details = {
+                            'company_number': company_number,
+                            'company_name': company.get('company_name', ''),
+                            'company_status': company.get('company_status', ''),
+                            'date_of_creation': company.get('date_of_creation', ''),
+                            'company_type': company.get('type', '')
+                        }
+                        
+                        # Only get full details if basic criteria are met
+                        if company_details['company_status'].lower() == 'active':
+                            full_details = self.get_company_details(company_number)
+                            if full_details:
+                                company_details.update(full_details)
+                                companies.append(company_details)
+                                processed_companies.add(company_number)
+                                logger.debug(f"Found matching company: {company_details['company_name']}")
+                    
+                    start_index += len(items)
+                    if start_index >= min(total_items, max_results):
+                        break
+                    
+                except Exception as e:
+                    logger.error(f"Error processing search term {term} at index {start_index}: {str(e)}")
                     break
-                
-                # Add a delay between pages to respect rate limits
-                time.sleep(RATE_LIMIT_DELAY)
-            
-            # Add a delay between search terms
-            time.sleep(RATE_LIMIT_DELAY * 2)
         
         logger.info(f"Found {len(companies)} unique companies for SIC code {sic_code}")
         return companies
@@ -326,7 +343,7 @@ class CompaniesHouseClient:
                         continue
                     
                     # Process companies in batches
-                    batch_size = 100
+                    batch_size = 50  # Reduced batch size for better handling
                     for i in range(0, len(companies), batch_size):
                         batch = companies[i:i + batch_size]
                         logger.info(f"Processing batch {i//batch_size + 1} of {len(companies)//batch_size + 1}")
@@ -336,18 +353,7 @@ class CompaniesHouseClient:
                             company_number = company.get('company_number')
                             company_name = company.get('company_name', 'Unknown')
                             
-                            if not company_number:
-                                logger.warning(f"Skipping company with no number: {company}")
-                                continue
-                            
-                            logger.info(f"Processing company: {company_name} ({company_number})")
-                            
                             try:
-                                # Check company status
-                                if company.get('company_status', '').lower() != 'active':
-                                    logger.info(f"Skipping inactive company: {company_name}")
-                                    continue
-                                
                                 # Get directors and their ages
                                 officers = self.get_company_officers(company_number)
                                 eligible_directors = []
@@ -364,17 +370,13 @@ class CompaniesHouseClient:
                                                     'appointed_on': officer.get('appointed_on', '')
                                                 })
                                 
-                                if not eligible_directors:
-                                    logger.info(f"No active directors over 50 found for {company_name}")
-                                    continue
-                                
                                 # Format director information
                                 directors_info = '; '.join([
                                     f"{d['name']} (Age: {d['age']}, Appointed: {d['appointed_on']})"
                                     for d in eligible_directors
                                 ])
                                 
-                                # Get turnover information from Companies House
+                                # Get turnover information
                                 ch_turnover = self.get_company_accounts(company_number)
                                 
                                 # Get VAT number and HMRC turnover
@@ -387,39 +389,30 @@ class CompaniesHouseClient:
                                     if vat_number:
                                         hmrc_turnover = self.hmrc_client.get_company_turnover(vat_number)
                                 
-                                # Check if either turnover meets the minimum requirement
-                                meets_turnover = (
-                                    (ch_turnover and ch_turnover >= MIN_TURNOVER) or
-                                    (hmrc_turnover and hmrc_turnover >= MIN_TURNOVER)
-                                )
-                                
-                                if not meets_turnover:
-                                    logger.info(f"Company {company_name} does not meet turnover requirements")
-                                    continue
-                                
-                                # Save company data
-                                company_data = {
-                                    'company_number': company_number,
-                                    'company_name': company_name,
-                                    'company_status': company.get('company_status', ''),
-                                    'incorporation_date': company.get('date_of_creation', ''),
-                                    'sic_codes': ', '.join(company.get('sic_codes', [])),
-                                    'registered_office_address': self._format_address(company.get('registered_office_address', {})),
-                                    'active_directors_over_50': directors_info,
-                                    'company_type': company.get('type', ''),
-                                    'companies_house_turnover': f"£{ch_turnover:,.2f}" if ch_turnover else 'Not available',
-                                    'hmrc_turnover': f"£{hmrc_turnover:,.2f}" if hmrc_turnover else 'Not available',
-                                    'last_accounts_date': (
-                                        company.get('last_accounts', {}).get('made_up_to', 'Not available')
-                                    ),
-                                    'category': category,
-                                    'vat_number': vat_number or 'Not available'
-                                }
-                                
-                                writer.writerow(company_data)
-                                csvfile.flush()  # Force write to disk
-                                saved_count += 1
-                                logger.info(f"Saved data for company {company_name}")
+                                # Save all companies that have directors over 50, regardless of turnover
+                                if eligible_directors:
+                                    company_data = {
+                                        'company_number': company_number,
+                                        'company_name': company_name,
+                                        'company_status': company.get('company_status', ''),
+                                        'incorporation_date': company.get('date_of_creation', ''),
+                                        'sic_codes': ', '.join(company.get('sic_codes', [])),
+                                        'registered_office_address': self._format_address(company.get('registered_office_address', {})),
+                                        'active_directors_over_50': directors_info,
+                                        'company_type': company.get('type', ''),
+                                        'companies_house_turnover': f"£{ch_turnover:,.2f}" if ch_turnover else 'Not available',
+                                        'hmrc_turnover': f"£{hmrc_turnover:,.2f}" if hmrc_turnover else 'Not available',
+                                        'last_accounts_date': (
+                                            company.get('last_accounts', {}).get('made_up_to', 'Not available')
+                                        ),
+                                        'category': category,
+                                        'vat_number': vat_number or 'Not available'
+                                    }
+                                    
+                                    writer.writerow(company_data)
+                                    csvfile.flush()  # Force write to disk
+                                    saved_count += 1
+                                    logger.info(f"Saved data for company {company_name}")
                                 
                             except Exception as e:
                                 logger.error(f"Error processing company {company_name}: {str(e)}")
@@ -429,7 +422,7 @@ class CompaniesHouseClient:
                             time.sleep(RATE_LIMIT_DELAY)
                         
                         logger.info(f"Completed batch. Total processed: {processed_count}, Total saved: {saved_count}")
-                        
+                    
                     logger.info(f"Completed SIC code {sic_code}. Total processed: {processed_count}, Total saved: {saved_count}")
                 
                 logger.info(f"Completed category {category}. Total processed: {processed_count}, Total saved: {saved_count}")
