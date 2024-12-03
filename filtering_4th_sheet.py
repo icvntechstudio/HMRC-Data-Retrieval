@@ -2,9 +2,15 @@ import os
 import pandas as pd
 import requests
 import re
+from dotenv import load_dotenv
 
-# Replace 'your_api_key' with your actual API key
+# Load environment variables
+load_dotenv()
+
+# Get API key from environment variable
 api_key = os.getenv('COMPANIES_API_KEY')
+if not api_key:
+    raise ValueError("COMPANIES_API_KEY environment variable is not set")
 
 def get_company_info(company_number):
     url = f"https://api.companieshouse.gov.uk/company/{company_number}"
