@@ -153,9 +153,27 @@ class HMRCClient:
         # Note: In test environment, this might not return real data
         logger.info(f"Getting turnover for VAT number {vat_number}")
         
-        # For test environment, return simulated data
+        # For test environment, return simulated data with a wider range
         import random
-        return random.uniform(500000, 2000000)
+        
+        # Generate turnovers across different ranges with weighted probabilities
+        ranges = [
+            (1_000_000, 10_000_000, 0.25),     # 25% chance of £1M-£10M
+            (10_000_000, 50_000_000, 0.35),    # 35% chance of £10M-£50M
+            (50_000_000, 250_000_000, 0.25),   # 25% chance of £50M-£250M
+            (250_000_000, 1_000_000_000, 0.15) # 15% chance of £250M-£1B
+        ]
+        
+        # Choose a range based on probabilities
+        range_choice = random.random()
+        cumulative_prob = 0
+        for min_val, max_val, prob in ranges:
+            cumulative_prob += prob
+            if range_choice <= cumulative_prob:
+                return random.uniform(min_val, max_val)
+        
+        # Fallback (shouldn't reach here due to probabilities summing to 1)
+        return random.uniform(10_000_000, 50_000_000)
 
     def process_companies(self, vrn_list):
         """Process list of companies by VAT registration numbers"""

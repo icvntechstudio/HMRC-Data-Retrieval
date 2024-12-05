@@ -24,8 +24,8 @@ COMPANIES_API_KEY = os.getenv('COMPANIES_API_KEY')
 BASE_URL = 'https://api.companieshouse.gov.uk'
 RATE_LIMIT_DELAY = 0.6  # Minimum delay between requests (in seconds)
 MIN_DIRECTOR_AGE = 50  # Minimum age for directors
-MIN_TURNOVER = 1_000_000  # £1 million
-MAX_TURNOVER = 1_000_000_000  # £1 billion
+MIN_TURNOVER = 1_000_000  # £1 million minimum turnover
+MAX_TURNOVER = 1_000_000_000  # £1 billion maximum turnover
 
 class CompaniesHouseClient:
     def __init__(self):
@@ -264,44 +264,107 @@ class CompaniesHouseClient:
                 for field in turnover_fields:
                     if field in accounts_data:
                         try:
-                            # Remove currency symbols and commas, convert to float
-                            turnover_str = accounts_data[field].replace('£', '').replace(',', '')
+                            turnover_str = str(accounts_data[field])
+                            # Add debug logging
+                            logger.debug(f"Raw turnover value for company {company_number}: {turnover_str}")
+                            
+                            # Handle different formats
+                            if isinstance(turnover_str, (int, float)):
+                                value = float(turnover_str)
+                                logger.debug(f"Direct numeric turnover for company {company_number}: {value}")
+                                return float(turnover_str)
+                            
+                            # Remove currency symbols and commas
+                            turnover_str = turnover_str.replace('£', '').replace(',', '').strip().lower()
+                            logger.debug(f"Cleaned turnover string: {turnover_str}")
+                            
                             # Handle ranges like "1000000-5000000"
                             if '-' in turnover_str:
-                                lower, upper = turnover_str.split('-')
-                                return float(lower.strip())  # Use lower bound conservatively
-                            return float(turnover_str)
+                                lower, upper = map(str.strip, turnover_str.split('-'))
+                                try:
+                                    # Try to get both bounds
+                                    lower_val = float(lower)
+                                    upper_val = float(upper)
+                                    value = upper_val  # Use upper value instead of max
+                                    logger.debug(f"Range turnover for company {company_number}: {lower_val}-{upper_val}, using {value}")
+                                    return value
+                                except ValueError:
+                                    # If upper bound fails, use lower bound
+                                    value = float(lower)
+                                    logger.debug(f"Using lower bound for company {company_number}: {value}")
+                                    return value
+                            
+                            # Handle text-based ranges
+                            turnover_bands = {
+                                # Exact ranges - use upper bound instead of middle value
+                                '1m-5m': 5_000_000,  # Use upper value
+                                '5m-10m': 10_000_000,  # Use upper value
+                                '10m-50m': 50_000_000,  # Use upper value
+                                '50m-100m': 100_000_000,  # Use upper value
+                                '100m-500m': 500_000_000,  # Use upper value
+                                '500m-1b': 1_000_000_000,  # Use upper value
+                                
+                                # 'Over X' ranges - use higher estimates
+                                'over 500m': min(900_000_000, MAX_TURNOVER),
+                                'over 250m': min(500_000_000, MAX_TURNOVER),
+                                'over 100m': min(250_000_000, MAX_TURNOVER),
+                                'over 50m': min(100_000_000, MAX_TURNOVER),
+                                'over 25m': min(50_000_000, MAX_TURNOVER),
+                                'over 10m': min(25_000_000, MAX_TURNOVER),
+                                'over 5m': min(10_000_000, MAX_TURNOVER),
+                                'over 2m': min(5_000_000, MAX_TURNOVER),
+                                'over 1m': min(2_500_000, MAX_TURNOVER),
+                            }
+                            
+                            # Add more variations of number formats
+                            number_suffixes = {
+                                'k': 1_000,
+                                'm': 1_000_000,
+                                'b': 1_000_000_000
+                            }
+                            
+                            # Try to parse numbers with suffixes (e.g., "5m", "2.5m", "1.2b")
+                            for suffix, multiplier in number_suffixes.items():
+                                if turnover_str.endswith(suffix):
+                                    try:
+                                        base_value = float(turnover_str[:-1])
+                                        value = base_value * multiplier
+                                        if MIN_TURNOVER <= value <= MAX_TURNOVER:
+                                            logger.debug(f"Parsed suffixed number for company {company_number}: {turnover_str} -> {value}")
+                                            return value
+                                    except ValueError:
+                                        continue
+                            
+                            for band, value in turnover_bands.items():
+                                if band.lower() in turnover_str:
+                                    # Ensure the value is within our limits
+                                    if MIN_TURNOVER <= value <= MAX_TURNOVER:
+                                        logger.debug(f"Matched turnover band for company {company_number}: {band} -> {value}")
+                                        return value
+                                    else:
+                                        logger.info(f"Turnover value {value} for band {band} outside allowed range for company {company_number}")
+                                        return None
+                            
+                            # Try direct conversion
+                            try:
+                                value = float(turnover_str)
+                                # Check if the direct value is within our limits
+                                if MIN_TURNOVER <= value <= MAX_TURNOVER:
+                                    logger.debug(f"Direct conversion turnover for company {company_number}: {value}")
+                                    return value
+                                else:
+                                    logger.info(f"Direct turnover value {value} outside allowed range for company {company_number}")
+                                    return None
+                            except ValueError:
+                                logger.debug(f"Could not parse turnover value '{turnover_str}' for company {company_number}")
+                                return None
+                            
                         except (ValueError, AttributeError) as e:
                             logger.warning(f"Could not parse turnover value '{accounts_data[field]}' for company {company_number}: {e}")
                             continue
         
         logger.warning(f"No turnover information found in filing history for company {company_number}")
         return None
-
-    def calculate_age(self, date_of_birth):
-        """Calculate age from date of birth dictionary"""
-        if not date_of_birth or 'year' not in date_of_birth:
-            return None
-            
-        try:
-            # Create a date object using year and month (if available)
-            year = int(date_of_birth['year'])
-            month = int(date_of_birth.get('month', 1))
-            day = 1  # Default to first of the month
-            
-            birth_date = datetime(year, month, day)
-            today = datetime.now()
-            
-            age = today.year - birth_date.year
-            
-            # Adjust age if birthday hasn't occurred this year
-            if today.month < birth_date.month:
-                age -= 1
-                
-            return age
-        except (ValueError, TypeError):
-            logger.error(f"Error calculating age for date of birth: {date_of_birth}")
-            return None
 
     def process_companies(self):
         """Process companies and save to CSV"""
@@ -335,19 +398,10 @@ class CompaniesHouseClient:
         
         # Define CSV fields
         fieldnames = [
-            'company_number',
-            'company_name',
-            'company_status',
-            'incorporation_date',
-            'sic_codes',
-            'registered_office_address',
-            'active_directors_over_50',
-            'company_type',
-            'companies_house_turnover',
-            'hmrc_turnover',
-            'last_accounts_date',
-            'category',
-            'vat_number'
+            'company_number', 'company_name', 'company_status',
+            'incorporation_date', 'sic_codes', 'registered_office_address',
+            'active_directors_over_50', 'company_type', 'companies_house_turnover',
+            'hmrc_turnover', 'last_accounts_date', 'category', 'vat_number'
         ]
         
         processed_count = 0
@@ -380,30 +434,12 @@ class CompaniesHouseClient:
                             company_name = company.get('company_name', 'Unknown')
                             
                             try:
-                                # Get directors and their ages
-                                officers = self.get_company_officers(company_number)
-                                eligible_directors = []
-                                
-                                if officers and 'items' in officers:
-                                    for officer in officers['items']:
-                                        if (officer.get('officer_role') == 'director' and 
-                                            not officer.get('resigned_on')):
-                                            age = self.calculate_age(officer.get('date_of_birth'))
-                                            if age and age >= MIN_DIRECTOR_AGE:
-                                                eligible_directors.append({
-                                                    'name': officer.get('name', ''),
-                                                    'age': age,
-                                                    'appointed_on': officer.get('appointed_on', '')
-                                                })
-                                
-                                # Format director information
-                                directors_info = '; '.join([
-                                    f"{d['name']} (Age: {d['age']}, Appointed: {d['appointed_on']})"
-                                    for d in eligible_directors
-                                ])
-                                
                                 # Get turnover information
                                 ch_turnover = self.get_company_accounts(company_number)
+                                if ch_turnover is None:
+                                    logger.debug(f"No Companies House turnover data for {company_name} ({company_number})")
+                                else:
+                                    logger.debug(f"Companies House turnover for {company_name}: £{ch_turnover:,.2f}")
                                 
                                 # Get VAT number and HMRC turnover
                                 vat_info = self.hmrc_client.get_vat_info(company_number)
@@ -414,38 +450,88 @@ class CompaniesHouseClient:
                                     vat_number = vat_info.get('vatNumber')
                                     if vat_number:
                                         hmrc_turnover = self.hmrc_client.get_company_turnover(vat_number)
+                                        if hmrc_turnover:
+                                            logger.debug(f"HMRC turnover for {company_name}: £{hmrc_turnover:,.2f}")
                                 
-                                # Check if either turnover meets our criteria
+                                # Check if either turnover meets our criteria (£1M to £1B)
                                 turnover_ok = False
+                                
+                                # Check Companies House turnover
                                 if ch_turnover and MIN_TURNOVER <= ch_turnover <= MAX_TURNOVER:
                                     turnover_ok = True
+                                    logger.debug(f"Company {company_name} meets turnover criteria from Companies House: £{ch_turnover:,.2f}")
+                                # Check HMRC turnover if Companies House turnover wasn't sufficient
                                 elif hmrc_turnover and MIN_TURNOVER <= hmrc_turnover <= MAX_TURNOVER:
                                     turnover_ok = True
+                                    logger.debug(f"Company {company_name} meets turnover criteria from HMRC: £{hmrc_turnover:,.2f}")
                                 
-                                # Save companies that have directors over 50 and meet turnover criteria
-                                if eligible_directors and turnover_ok:
-                                    company_data = {
-                                        'company_number': company_number,
-                                        'company_name': company_name,
-                                        'company_status': company.get('company_status', ''),
-                                        'incorporation_date': company.get('date_of_creation', ''),
-                                        'sic_codes': ', '.join(company.get('sic_codes', [])),
-                                        'registered_office_address': self._format_address(company.get('registered_office_address', {})),
-                                        'active_directors_over_50': directors_info,
-                                        'company_type': company.get('type', ''),
-                                        'companies_house_turnover': f"£{ch_turnover:,.2f}" if ch_turnover else 'Not available',
-                                        'hmrc_turnover': f"£{hmrc_turnover:,.2f}" if hmrc_turnover else 'Not available',
-                                        'last_accounts_date': (
-                                            company.get('last_accounts', {}).get('made_up_to', 'Not available')
-                                        ),
-                                        'category': category,
-                                        'vat_number': vat_number or 'Not available'
-                                    }
+                                # Only proceed if we have a valid turnover between £1M and £1B
+                                if not turnover_ok:
+                                    logger.debug(f"Skipping {company_name} - No valid turnover between £{MIN_TURNOVER:,.0f} and £{MAX_TURNOVER:,.0f}")
+                                    continue
+                                
+                                # Get officers and check ages
+                                officers_data = self.get_company_officers(company_number)
+                                directors_over_50_info = []
+                                total_directors = 0
+                                
+                                if officers_data and 'items' in officers_data:
+                                    for officer in officers_data['items']:
+                                        if officer.get('officer_role', '').lower() == 'director':
+                                            total_directors += 1
+                                            date_of_birth = officer.get('date_of_birth')
+                                            if date_of_birth:
+                                                age = self.calculate_age(date_of_birth)
+                                                if age:
+                                                    if age >= MIN_DIRECTOR_AGE:
+                                                        # Get director's name
+                                                        name_parts = []
+                                                        if officer.get('name_elements'):
+                                                            title = officer['name_elements'].get('title', '')
+                                                            forename = officer['name_elements'].get('forename', '')
+                                                            surname = officer['name_elements'].get('surname', '')
+                                                            name_parts = [p for p in [title, forename, surname] if p]
+                                                        
+                                                        # Use name from name_elements if available, otherwise fallback to name field
+                                                        director_name = ' '.join(name_parts) if name_parts else officer.get('name', 'Unknown')
+                                                        directors_over_50_info.append(f"{director_name} (Age: {age})")
+                                                        logger.debug(f"Found director over {MIN_DIRECTOR_AGE} for {company_name}: {director_name} (Age: {age})")
                                     
-                                    writer.writerow(company_data)
-                                    csvfile.flush()  # Force write to disk
-                                    saved_count += 1
-                                    logger.info(f"Saved data for company {company_name}")
+                                    if total_directors == 0:
+                                        logger.debug(f"Skipping {company_name} - No directors found")
+                                    else:
+                                        logger.debug(f"Company {company_name} has {total_directors} directors, {len(directors_over_50_info)} are over {MIN_DIRECTOR_AGE}")
+                                else:
+                                    logger.debug(f"Skipping {company_name} - No officers data available")
+
+                                # Skip if no directors over 50
+                                if not directors_over_50_info:
+                                    logger.debug(f"Skipping {company_name} - No directors aged {MIN_DIRECTOR_AGE}+")
+                                    continue
+                                
+                                # Save companies that have £1M+ turnover and directors aged 50+
+                                company_data = {
+                                    'company_number': company_number,
+                                    'company_name': company_name,
+                                    'company_status': company.get('company_status', ''),
+                                    'incorporation_date': company.get('date_of_creation', ''),
+                                    'sic_codes': ', '.join(company.get('sic_codes', [])),
+                                    'registered_office_address': self._format_address(company.get('registered_office_address', {})),
+                                    'active_directors_over_50': '; '.join(directors_over_50_info),
+                                    'company_type': company.get('type', ''),
+                                    'companies_house_turnover': f"£{ch_turnover:,.2f}" if ch_turnover else 'Not available',
+                                    'hmrc_turnover': f"£{hmrc_turnover:,.2f}" if hmrc_turnover else 'Not available',
+                                    'last_accounts_date': (
+                                        company.get('last_accounts', {}).get('made_up_to', 'Not available')
+                                    ),
+                                    'category': category,
+                                    'vat_number': vat_number or 'Not available'
+                                }
+                                
+                                writer.writerow(company_data)
+                                csvfile.flush()  # Force write to disk
+                                saved_count += 1
+                                logger.info(f"Saved data for company {company_name}")
                                 
                             except Exception as e:
                                 logger.error(f"Error processing company {company_name}: {str(e)}")
@@ -477,6 +563,31 @@ class CompaniesHouseClient:
             address_dict.get('country', '')
         ]
         return ', '.join(part for part in address_parts if part)
+
+    def calculate_age(self, date_of_birth):
+        """Calculate age from date of birth dictionary"""
+        if not date_of_birth or 'year' not in date_of_birth:
+            return None
+            
+        try:
+            # Create a date object using year and month (if available)
+            year = int(date_of_birth['year'])
+            month = int(date_of_birth.get('month', 1))
+            day = 1  # Default to first of the month
+            
+            birth_date = datetime(year, month, day)
+            today = datetime.now()
+            
+            age = today.year - birth_date.year
+            
+            # Adjust age if birthday hasn't occurred this year
+            if today.month < birth_date.month:
+                age -= 1
+                
+            return age
+        except (ValueError, TypeError):
+            logger.error(f"Error calculating age for date of birth: {date_of_birth}")
+            return None
 
 def main():
     try:
