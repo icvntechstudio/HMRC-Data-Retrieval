@@ -370,25 +370,25 @@ class CompaniesHouseClient:
         """Process companies and save to CSV"""
         # Define SIC codes for cleaning and waste management
         sic_codes = {
-            "Cleaning": [
+            'Cleaning Services': [
                 '81210',  # General cleaning of buildings
                 '81229',  # Other specialized cleaning activities
+                '81299',  # Other cleaning services n.e.c.
                 '81220',  # Other building and industrial cleaning activities
                 '81222',  # Specialized cleaning activities
                 '81221',  # Window cleaning services
-                '81223',  # Chimney cleaning services
-                '81299',  # Other cleaning services n.e.c.
-                '81290',  # Other cleaning activities
-                '81291',  # Disinfecting and exterminating services
-                '81200',  # General cleaning activities
-                '81300',  # Landscaping activities
                 '82990',  # Other business support activities
+                '81223',  # Chimney cleaning services
+                '81200',  # General cleaning activities
+                '81291',  # Disinfecting and exterminating services
+                '81290',  # Other cleaning activities
+                '81300'   # Landscaping activities
             ],
-            "Waste Management": [
+            'Waste Management': [
                 '38110',  # Collection of non-hazardous waste
                 '38320',  # Recovery of sorted materials
                 '38220',  # Treatment and disposal of hazardous waste
-                '38210',  # Treatment and disposal of non-hazardous waste
+                '38210'   # Treatment and disposal of non-hazardous waste
             ]
         }
         
