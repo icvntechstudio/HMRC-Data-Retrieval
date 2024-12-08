@@ -117,45 +117,49 @@ class CompaniesHouseClient:
         max_results = 20000
         processed_companies = set()
         
-        # Search terms optimized for each SIC code
-        search_terms = {
-            # General cleaning
-            '81210': [f'"{sic_code}" cleaning'],
-            '81200': [f'"{sic_code}" cleaning'],
+        # Search terms optimized for each SIC code with alphabetical distribution
+        search_prefixes = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 
+                          'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
+        
+        base_terms = {
+            # General cleaning services
+            '81210': 'general cleaning',
+            '81200': 'cleaning services',
             
             # Specialized cleaning
-            '81220': [f'"{sic_code}" cleaning'],
-            '81221': [f'"{sic_code}" window cleaning'],
-            '81222': [f'"{sic_code}" specialized cleaning'],
-            '81223': [f'"{sic_code}" chimney cleaning'],
-            '81229': [f'"{sic_code}" specialized cleaning'],
+            '81220': 'industrial cleaning',
+            '81221': 'window cleaning',
+            '81222': 'specialized cleaning',
+            '81223': 'chimney cleaning',
+            '81229': 'specialized cleaning',
             
-            # Other cleaning
-            '81290': [f'"{sic_code}" cleaning'],
-            '81291': [f'"{sic_code}" disinfecting'],
-            '81299': [f'"{sic_code}" cleaning'],
+            # Other cleaning services
+            '81290': 'cleaning services',
+            '81291': 'disinfecting services',
+            '81299': 'cleaning activities',
             
-            # Additional services
-            '81300': [f'"{sic_code}" landscaping'],
-            '82990': [f'"{sic_code}" cleaning'],
+            # Landscaping and additional services
+            '81300': 'landscaping services',
+            '82990': 'business support',
             
-            # Waste management
-            '38110': [f'"{sic_code}" waste'],
-            '38210': [f'"{sic_code}" waste treatment'],
-            '38220': [f'"{sic_code}" hazardous waste'],
-            '38320': [f'"{sic_code}" recycling']
+            # Waste management and recycling
+            '38110': 'waste collection',
+            '38210': 'non-hazardous waste',
+            '38220': 'hazardous waste',
+            '38320': 'materials recovery'
         }
         
-        terms = search_terms.get(sic_code, [f'"{sic_code}"'])
+        base_term = base_terms.get(sic_code, '')
         
-        for term in terms:
-            logger.info(f"Searching with term: {term}")
+        for prefix in search_prefixes:
+            search_term = f'{prefix}* {base_term}'
+            logger.info(f"Searching with term: {search_term}")
             start_index = 0
             
             while start_index < max_results:
                 try:
                     params = {
-                        'q': term,
+                        'q': f'"{sic_code}" {search_term}',
                         'items_per_page': items_per_page,
                         'start_index': start_index,
                         'restrictions': 'active'
@@ -171,9 +175,9 @@ class CompaniesHouseClient:
                         break
                     
                     total_items = response_data.get('total_results', 0)
-                    logger.info(f"Processing {len(items)} companies from index {start_index}. Total available: {total_items}")
+                    logger.info(f"Processing {len(items)} companies starting with '{prefix}' from index {start_index}. Total available: {total_items}")
                     
-                    # Process companies in batches
+                    # Process companies in this batch
                     for company in items:
                         company_number = company.get('company_number')
                         
@@ -202,8 +206,12 @@ class CompaniesHouseClient:
                     if start_index >= min(total_items, max_results):
                         break
                     
+                    # Rate limiting
+                    time.sleep(RATE_LIMIT_DELAY)
+                    
                 except Exception as e:
-                    logger.error(f"Error processing search term {term} at index {start_index}: {str(e)}")
+                    logger.error(f"Error processing search term '{search_term}' at index {start_index}: {str(e)}")
+                    time.sleep(2)  # Wait longer on error
                     break
         
         logger.info(f"Found {len(companies)} unique companies for SIC code {sic_code}")
@@ -370,25 +378,25 @@ class CompaniesHouseClient:
         """Process companies and save to CSV"""
         # Define SIC codes for cleaning and waste management
         sic_codes = {
-            'Cleaning Services': [
+            "Cleaning": [
                 '81210',  # General cleaning of buildings
                 '81229',  # Other specialized cleaning activities
-                '81299',  # Other cleaning services n.e.c.
                 '81220',  # Other building and industrial cleaning activities
                 '81222',  # Specialized cleaning activities
                 '81221',  # Window cleaning services
-                '82990',  # Other business support activities
                 '81223',  # Chimney cleaning services
-                '81200',  # General cleaning activities
-                '81291',  # Disinfecting and exterminating services
+                '81299',  # Other cleaning services n.e.c.
                 '81290',  # Other cleaning activities
-                '81300'   # Landscaping activities
+                '81291',  # Disinfecting and exterminating services
+                '81200',  # General cleaning activities
+                '81300',  # Landscaping activities
+                '82990',  # Other business support activities
             ],
-            'Waste Management': [
+            "Waste Management": [
                 '38110',  # Collection of non-hazardous waste
                 '38320',  # Recovery of sorted materials
                 '38220',  # Treatment and disposal of hazardous waste
-                '38210'   # Treatment and disposal of non-hazardous waste
+                '38210',  # Treatment and disposal of non-hazardous waste
             ]
         }
         
