@@ -9,14 +9,14 @@ This project focuses on retrieving and analyzing company data from a comprehensi
 The challenge was to efficiently manage and analyze a large dataset that was initially over 9,000 entries, reduced to 5,000 for better performance and manageability. The objective was to extract meaningful insights regarding company operations and financial status.
 
 **Technologies Used**
-- Python: For data manipulation and analysis.
-- CSV: The format used for storing the dataset.
+- **Python**: For data manipulation and analysis.
+- **CSV**: The format used for storing the dataset.
 
 ### Data Overview
 The dataset comprises:
 
 - 5,000+ companies with detailed information on their structure and financials.
-- Key attributes include company names, addresses, SIC codes, directors, and annual turnover.
+- Key attributes include company registration number, company names, addresses, SIC codes, directors, and annual turnover.
 
 ### Implementation
 1. **Data Retrieval**: The data was sourced from a CSV file, which was cleaned and processed to ensure accuracy.
