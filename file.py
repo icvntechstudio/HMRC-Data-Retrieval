@@ -6,7 +6,7 @@
     3. Run the script using the command: python file.py
 """
 input_file = "company_names.txt"
-output_file = "processed-1st-to-3rd.txt"
+output_file = "processed-9k-leads.txt"
 
 with open(input_file, "r") as file:
     lines = file.readlines()
