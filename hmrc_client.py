@@ -3,10 +3,8 @@ import requests
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import json
 import csv
 import time
-import base64
 
 # Load environment variables
 load_dotenv()
