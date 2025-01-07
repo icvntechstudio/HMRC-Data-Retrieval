@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import csv
 import time
+import base64
+from urllib.parse import urlencode
 
 # Load environment variables
 load_dotenv()
@@ -15,16 +17,21 @@ logger = logging.getLogger(__name__)
 
 class HMRCClient:
     def __init__(self):
-        self.client_id = os.getenv('HMRC_API_KEY')
-        self.client_secret = os.getenv('HMRC_SERVER_TOKEN')
-        self.server_token = os.getenv('HMRC_SERVER_TOKEN')
+        self.client_id = os.getenv('HMRC_CLIENT_ID')
+        self.client_secret = os.getenv('HMRC_CLIENT_SECRET')
         
         if not self.client_id:
-            raise ValueError("HMRC_API_KEY not found in environment variables")
+            raise ValueError("HMRC_CLIENT_ID not found in environment variables")
         if not self.client_secret:
-            raise ValueError("HMRC_SERVER_TOKEN not found in environment variables")
-            
+            raise ValueError("HMRC_CLIENT_SECRET not found in environment variables")
+        
+        logger.info("Initialized HMRC client with client ID: Present")
+        logger.info("Client secret: Present")
+        
+        # Use sandbox environment
         self.base_url = 'https://test-api.service.hmrc.gov.uk'
+        logger.info("Using HMRC Test API environment")
+        
         self.access_token = None
         self.token_expiry = None
         self.session = requests.Session()
@@ -36,59 +43,73 @@ class HMRCClient:
             pool_maxsize=10
         ))
         
-        logger.info(f"Initialized HMRC client with client ID: {'Present' if self.client_id else 'Missing'}")
-        logger.info(f"Client secret: {'Present' if self.client_secret else 'Missing'}")
-        logger.info("Using HMRC Test API environment")
-        
         # Get initial auth token
         self.authenticate()
 
     def authenticate(self):
-        """Authenticate with the HMRC API"""
-        logger.info("Authenticating with HMRC API...")
-        
+        """
+        Authenticate with HMRC API and get access token
+        """
         auth_url = f"{self.base_url}/oauth/token"
         
-        # Prepare the authentication data
-        auth_data = {
+        # Check if we have a valid token
+        current_time = datetime.fromisoformat("2025-01-07T20:08:58+08:00")
+        if self.access_token and self.token_expiry and current_time < self.token_expiry:
+            return self.access_token
+
+        # Create base64 encoded credentials
+        credentials = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+        
+        headers = {
+            'Authorization': f'Basic {credentials}',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        # URL encode the form data properly
+        data = urlencode({
             'client_id': self.client_id,
             'client_secret': self.client_secret,
             'grant_type': 'client_credentials'
-        }
-        
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Authorization': f'Bearer {self.server_token}'
-        }
+        })
         
         try:
-            response = requests.post(auth_url, data=auth_data, headers=headers)
+            logger.info(f"Attempting authentication with URL: {auth_url}")
+            logger.info(f"Headers: Authorization: Basic ******, Content-Type: {headers['Content-Type']}")
+            logger.info("Request data: client_id, client_secret, and grant_type present")
+            
+            response = self.session.post(auth_url, headers=headers, data=data)
+            
+            logger.info(f"Response status code: {response.status_code}")
+            logger.info(f"Response headers: {dict(response.headers)}")
+            
+            if response.status_code != 200:
+                logger.error(f"Response text: {response.text}")
+            
             response.raise_for_status()
             
             token_data = response.json()
-            self.access_token = token_data.get('access_token')
-            expires_in = token_data.get('expires_in', 14400)  # Default 4 hours
-            self.token_expiry = datetime.now() + timedelta(seconds=expires_in)
+            self.access_token = token_data['access_token']
+            # Set token expiry (usually 4 hours from now)
+            self.token_expiry = current_time + timedelta(seconds=token_data.get('expires_in', 14400))
             
             logger.info("Successfully authenticated with HMRC API")
-            return True
+            return self.access_token
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Authentication failed: {str(e)}")
-            if hasattr(e.response, 'status_code'):
-                logger.error(f"Response status code: {e.response.status_code}")
-            if hasattr(e.response, 'text'):
-                logger.error(f"Response text: {e.response.text}")
-            return False
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Response: {e.response.text}")
+            raise
 
     def make_request(self, url, method='get', data=None, params=None):
         """Make a request to the HMRC API"""
         max_retries = 3
+        current_time = datetime.fromisoformat("2025-01-07T20:10:23+08:00")
         
         for attempt in range(max_retries):
             try:
                 # Check if we need to authenticate
-                if not self.access_token or datetime.now() > self.token_expiry:
+                if not self.access_token or current_time > self.token_expiry:
                     logger.info("Token might be expired, trying to re-authenticate...")
                     if not self.authenticate():
                         logger.error("Failed to authenticate with HMRC API")
@@ -102,9 +123,9 @@ class HMRCClient:
                 
                 logger.info(f"Making {method.upper()} request to {url}")
                 if method.lower() == 'get':
-                    response = requests.get(url, headers=headers, params=params)
+                    response = self.session.get(url, headers=headers, params=params)
                 else:
-                    response = requests.post(url, headers=headers, json=data)
+                    response = self.session.post(url, headers=headers, json=data)
                 
                 response.raise_for_status()
                 return response.json()
@@ -137,41 +158,69 @@ class HMRCClient:
 
     def get_vat_info(self, company_number):
         """Get VAT information for a company"""
-        # Note: In test environment, this might not return real data
+        # Note: In production environment, this should return real data
         logger.info(f"Getting VAT info for company {company_number}")
         
-        # For test environment, return simulated data
-        return {
-            'vatNumber': f"GB{company_number}",
-            'registrationDate': '2020-01-01'
-        }
+        # For production environment, return real data
+        url = f"{self.base_url}/organisations/vat/{company_number}/registration"
+        response = self.make_request(url)
+        if not response:
+            logger.warning(f"Could not get VAT info for company {company_number}")
+            return None
+        
+        vat_info = response
+        return vat_info
 
     def get_company_turnover(self, vat_number):
         """Get company turnover from VAT returns"""
-        # Note: In test environment, this might not return real data
         logger.info(f"Getting turnover for VAT number {vat_number}")
         
-        # For test environment, return simulated data with a wider range
-        import random
-        
-        # Generate turnovers across different ranges with weighted probabilities
-        ranges = [
-            (1_000_000, 10_000_000, 0.25),     # 25% chance of £1M-£10M
-            (10_000_000, 50_000_000, 0.35),    # 35% chance of £10M-£50M
-            (50_000_000, 250_000_000, 0.25),   # 25% chance of £50M-£250M
-            (250_000_000, 1_000_000_000, 0.15) # 15% chance of £250M-£1B
-        ]
-        
-        # Choose a range based on probabilities
-        range_choice = random.random()
-        cumulative_prob = 0
-        for min_val, max_val, prob in ranges:
-            cumulative_prob += prob
-            if range_choice <= cumulative_prob:
-                return random.uniform(min_val, max_val)
-        
-        # Fallback (shouldn't reach here due to probabilities summing to 1)
-        return random.uniform(10_000_000, 50_000_000)
+        try:
+            # Get VAT returns for the last 4 quarters
+            url = f"{self.base_url}/organisations/vat/{vat_number}/returns"
+            current_time = datetime.fromisoformat("2025-01-07T20:10:23+08:00")
+            
+            params = {
+                'from': (current_time - timedelta(days=365)).strftime('%Y-%m-%d'),
+                'to': current_time.strftime('%Y-%m-%d')
+            }
+            
+            response = self.make_request(url, params=params)
+            if not response or 'returns' not in response:
+                logger.warning(f"No VAT returns found for {vat_number}")
+                return None
+                
+            # Calculate annual turnover from VAT returns
+            total_turnover = 0
+            returns = response.get('returns', [])
+            
+            if not returns:
+                logger.warning(f"No VAT returns data available for {vat_number}")
+                return None
+                
+            # Sum up the net VAT due from each return
+            # Box 6 contains the total value of sales and all other outputs
+            valid_returns = 0
+            for vat_return in returns:
+                if 'periodKey' in vat_return and 'box6' in vat_return:
+                    total_turnover += float(vat_return['box6'])
+                    valid_returns += 1
+            
+            if valid_returns == 0:
+                logger.warning(f"No valid VAT returns found for {vat_number}")
+                return None
+            
+            # Calculate average quarterly turnover and extrapolate to annual
+            if valid_returns < 4:
+                annual_turnover = (total_turnover / valid_returns) * 4
+            else:
+                annual_turnover = total_turnover
+            
+            return annual_turnover
+            
+        except Exception as e:
+            logger.error(f"Error getting turnover for {vat_number}: {str(e)}")
+            return None
 
     def process_companies(self, vrn_list):
         """Process list of companies by VAT registration numbers"""
