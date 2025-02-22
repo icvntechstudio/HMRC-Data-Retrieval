@@ -1,0 +1,4 @@
+└─$ curl -X GET "https://api.service.hmrc.gov.uk/organisations/vat/check-vat-number/lookup/442657681" \
+-H "Authorization: Bearer 9f4b102fa421ed450255c2cb086d3733" \
+-H "Accept: application/vnd.hmrc.2.0+json"
+

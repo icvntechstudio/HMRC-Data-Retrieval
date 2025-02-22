@@ -7,30 +7,31 @@ import csv
 import time
 import base64
 from urllib.parse import urlencode
+import pytz
 
 # Load environment variables
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)  # Change to DEBUG level
 logger = logging.getLogger(__name__)
 
 class HMRCClient:
     def __init__(self):
-        self.client_id = os.getenv('HMRC_CLIENT_ID')
+        self.api_key = os.getenv('HMRC_CLIENT_ID')
         self.client_secret = os.getenv('HMRC_CLIENT_SECRET')
+        self.base_url = "https://api.service.hmrc.gov.uk"  
         
-        if not self.client_id:
+        if not self.api_key:
             raise ValueError("HMRC_CLIENT_ID not found in environment variables")
-        if not self.client_secret:
+        
+        if not self.client_secret:  # Add this check
             raise ValueError("HMRC_CLIENT_SECRET not found in environment variables")
         
-        logger.info("Initialized HMRC client with client ID: Present")
-        logger.info("Client secret: Present")
-        
-        # Use sandbox environment
-        self.base_url = 'https://test-api.service.hmrc.gov.uk'
-        logger.info("Using HMRC Test API environment")
+        logger.info(f"Initialized HMRC client with API key: {self.api_key}")
+        logger.debug(f"API Key: {self.api_key}")
+        logger.debug(f"Client Secret: {self.client_secret}")
+        logger.debug(f"Base URL: {self.base_url}")
         
         self.access_token = None
         self.token_expiry = None
@@ -53,34 +54,42 @@ class HMRCClient:
         auth_url = f"{self.base_url}/oauth/token"
         
         # Check if we have a valid token
-        current_time = datetime.fromisoformat("2025-01-07T20:08:58+08:00")
+        current_time = datetime.now(pytz.utc)
         if self.access_token and self.token_expiry and current_time < self.token_expiry:
             return self.access_token
 
         # Create base64 encoded credentials
-        credentials = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+        credentials = base64.b64encode(f"{self.api_key}:{self.client_secret}".encode()).decode()
         
         headers = {
             'Authorization': f'Basic {credentials}',
-            'Content-Type': 'application/x-www-form-urlencoded'
+            'Content-Type': "application/x-www-form-urlencoded",  # Update content type
+            'Accept': 'application/vnd.hmrc.2.0+json'  # Add Accept header
         }
         
         # URL encode the form data properly
-        data = urlencode({
-            'client_id': self.client_id,
+        data = {
+            'client_id': self.api_key,
             'client_secret': self.client_secret,
-            'grant_type': 'client_credentials'
-        })
+            'grant_type': 'client_credentials'  # Ensure grant_type is included
+        }
+        encoded_data = urlencode(data)  # URL-encode the data
+        
+        logger.debug(f"Auth URL: {auth_url}")
+        logger.debug(f"Encoded Credentials: {credentials}")
+        logger.debug(f"Headers: {headers}")
+        logger.debug(f"Encoded Data: {encoded_data}")
         
         try:
             logger.info(f"Attempting authentication with URL: {auth_url}")
             logger.info(f"Headers: Authorization: Basic ******, Content-Type: {headers['Content-Type']}")
-            logger.info("Request data: client_id, client_secret, and grant_type present")
+            logger.info(f"Request data: {encoded_data}")  # Log the encoded data
             
-            response = self.session.post(auth_url, headers=headers, data=data)
+            response = self.session.post(auth_url, headers=headers, data=encoded_data)  # Send encoded data
             
             logger.info(f"Response status code: {response.status_code}")
             logger.info(f"Response headers: {dict(response.headers)}")
+            logger.debug(f"Response text: {response.text}")  # Add this line to log the response text
             
             if response.status_code != 200:
                 logger.error(f"Response text: {response.text}")
@@ -104,7 +113,8 @@ class HMRCClient:
     def make_request(self, url, method='get', data=None, params=None):
         """Make a request to the HMRC API"""
         max_retries = 3
-        current_time = datetime.fromisoformat("2025-01-07T20:10:23+08:00")
+        current_time = datetime.now(pytz.utc)
+        timeout = 10  # Add a timeout of 10 seconds
         
         for attempt in range(max_retries):
             try:
@@ -117,19 +127,24 @@ class HMRCClient:
                 
                 headers = {
                     'Authorization': f'Bearer {self.access_token}',
-                    'Accept': 'application/vnd.hmrc.1.0+json',
+                    'Accept': 'application/vnd.hmrc.2.0+json',
                     'Content-Type': 'application/json'
                 }
                 
                 logger.info(f"Making {method.upper()} request to {url}")
                 if method.lower() == 'get':
-                    response = self.session.get(url, headers=headers, params=params)
+                    response = self.session.get(url, headers=headers, params=params, timeout=timeout)  # Add timeout
                 else:
-                    response = self.session.post(url, headers=headers, json=data)
+                    response = self.session.post(url, headers=headers, json=data, timeout=timeout)  # Add timeout
                 
                 response.raise_for_status()
                 return response.json()
-                
+            
+            except requests.exceptions.Timeout:
+                logger.error(f"Request timed out on attempt {attempt + 1}")
+                if attempt == max_retries - 1:
+                    return None
+                time.sleep(1)
             except requests.exceptions.HTTPError as e:
                 logger.error(f"HTTP Error on attempt {attempt + 1}: {str(e)}")
                 if e.response.status_code == 401:
@@ -147,7 +162,6 @@ class HMRCClient:
                     logger.error(f"Response status code: {e.response.status_code}")
                     logger.error(f"Response text: {e.response.text}")
                     return None
-            
             except Exception as e:
                 logger.error(f"Request failed on attempt {attempt + 1}: {str(e)}")
                 if attempt == max_retries - 1:
@@ -172,54 +186,34 @@ class HMRCClient:
         return vat_info
 
     def get_company_turnover(self, vat_number):
-        """Get company turnover from VAT returns"""
-        logger.info(f"Getting turnover for VAT number {vat_number}")
+        url = f"{self.base_url}/organisations/vat/{vat_number}/returns"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",  # Use access_token instead of api_key
+            "Accept": "application/vnd.hmrc.1.0+json"
+        }
+        logger.debug(f"Fetching turnover for VAT number: {vat_number} with URL: {url}")
         
         try:
-            # Get VAT returns for the last 4 quarters
-            url = f"{self.base_url}/organisations/vat/{vat_number}/returns"
-            current_time = datetime.fromisoformat("2025-01-07T20:10:23+08:00")
+            response = self.session.get(url, headers=headers, timeout=10)  # Add timeout
+            response.raise_for_status()
             
-            params = {
-                'from': (current_time - timedelta(days=365)).strftime('%Y-%m-%d'),
-                'to': current_time.strftime('%Y-%m-%d')
-            }
-            
-            response = self.make_request(url, params=params)
-            if not response or 'returns' not in response:
-                logger.warning(f"No VAT returns found for {vat_number}")
+            if response.status_code == 200:
+                data = response.json()
+                # Assuming the turnover is part of the response data
+                turnover = data.get("turnover")
+                logger.debug(f"Turnover data received: {data}")
+                return turnover
+            elif response.status_code == 404:
+                logger.error(f"Resource not found for VAT number {vat_number}. Status Code: {response.status_code}, Response: {response.text}")
                 return None
-                
-            # Calculate annual turnover from VAT returns
-            total_turnover = 0
-            returns = response.get('returns', [])
-            
-            if not returns:
-                logger.warning(f"No VAT returns data available for {vat_number}")
-                return None
-                
-            # Sum up the net VAT due from each return
-            # Box 6 contains the total value of sales and all other outputs
-            valid_returns = 0
-            for vat_return in returns:
-                if 'periodKey' in vat_return and 'box6' in vat_return:
-                    total_turnover += float(vat_return['box6'])
-                    valid_returns += 1
-            
-            if valid_returns == 0:
-                logger.warning(f"No valid VAT returns found for {vat_number}")
-                return None
-            
-            # Calculate average quarterly turnover and extrapolate to annual
-            if valid_returns < 4:
-                annual_turnover = (total_turnover / valid_returns) * 4
             else:
-                annual_turnover = total_turnover
-            
-            return annual_turnover
-            
-        except Exception as e:
-            logger.error(f"Error getting turnover for {vat_number}: {str(e)}")
+                logger.error(f"Failed to fetch turnover for VAT number {vat_number}. Status Code: {response.status_code}, Response: {response.text}")
+                return None
+        except requests.exceptions.Timeout:
+            logger.error(f"Request timed out for VAT number {vat_number}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed for VAT number {vat_number}: {str(e)}")
             return None
 
     def process_companies(self, vrn_list):
@@ -294,12 +288,19 @@ class HMRCClient:
             logger.error(f"Unexpected error during processing: {str(e)}")
             return None
 
+def load_company_names_from_file(file_path):
+    """Load company names from a file"""
+    company_names = []
+    with open(file_path, 'r') as file:
+        for line in file:
+            company_name = line.strip()
+            if company_name:  # Only add non-empty names
+                company_names.append(company_name)
+    return company_names
+
 def main():
-    # You'll need to provide a list of VAT Registration Numbers to process
-    vrn_list = [
-        "123456789",  # Example VRN
-        "987654321"   # Example VRN
-    ]
+    # Load company names from new-leads.txt
+    vrn_list = load_company_names_from_file('/home/highcenburg/DEV/Clients/Data Retrieval/new-leads.txt')
     
     logger.info("Starting HMRC data retrieval script")
     client = HMRCClient()
